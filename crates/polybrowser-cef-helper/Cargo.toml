@@ -1,0 +1,9 @@
+[package]
+name = "polybrowser-cef-helper"
+description = "The helper executable Chromium runs its renderer, GPU and utility processes in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+polybrowser-cef = { workspace = true }

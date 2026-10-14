@@ -1,0 +1,4 @@
+# The Chromium backend downloads a CEF binary distribution (~1 GB unpacked) at
+# build time. Keeping it in one place means debug and release builds share it.
+[env]
+CEF_PATH = { value = "target/cef", relative = true }

@@ -1,0 +1,13 @@
+[package]
+name = "polybrowser-bundler"
+description = "Builds the macOS application bundle that the Chromium engine of polybrowser needs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "polybrowser-bundle"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }

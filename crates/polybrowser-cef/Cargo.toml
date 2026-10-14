@@ -1,0 +1,31 @@
+[package]
+name = "polybrowser-cef"
+description = "Chromium backend for polybrowser, through the Chromium Embedded Framework"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["sandbox"]
+# Run Chromium's renderer and GPU processes inside its sandbox.
+sandbox = ["cef/sandbox"]
+
+[dependencies]
+polybrowser-core = { workspace = true }
+raw-window-handle = { workspace = true }
+
+# Only macOS is implemented so far. Keeping CEF a macOS dependency means that
+# enabling the feature elsewhere does not download a browser it cannot use.
+[target.'cfg(target_os = "macos")'.dependencies]
+cef = { workspace = true }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSApplication",
+    "NSEvent",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { workspace = true, features = ["std", "objc2-core-foundation", "NSGeometry"] }

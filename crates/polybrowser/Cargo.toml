@@ -1,0 +1,35 @@
+[package]
+name = "polybrowser"
+description = "A web browser for any desktop application: pick WebKit, WebView2 or Chromium, with profiles, history and import from installed browsers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+keywords = ["browser", "webview", "chromium", "webkit", "gui"]
+categories = ["gui", "web-programming"]
+
+[features]
+default = ["webkit", "webview2"]
+# WebKit as shipped by the system: WKWebView on macOS, WebKitGTK on Linux.
+webkit = ["dep:polybrowser-wry"]
+# Edge WebView2, shipped with Windows.
+webview2 = ["dep:polybrowser-wry"]
+# Chromium through CEF, bundled with the application. Implemented for macOS
+# so far. Needs CMake and Ninja to build, and an application bundle to run
+# (see the README).
+chromium = ["dep:polybrowser-cef"]
+# Keep the web inspector of the system web view in release builds.
+devtools = ["polybrowser-wry?/devtools"]
+
+[dependencies]
+polybrowser-core = { workspace = true }
+polybrowser-wry = { workspace = true, optional = true }
+polybrowser-cef = { workspace = true, optional = true }
+raw-window-handle = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+winit = { workspace = true }
+
+[[example]]
+name = "chromium"
+required-features = ["chromium"]

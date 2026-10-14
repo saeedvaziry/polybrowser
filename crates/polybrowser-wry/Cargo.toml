@@ -1,0 +1,16 @@
+[package]
+name = "polybrowser-wry"
+description = "System web view backend for polybrowser: WKWebView, WebKitGTK and WebView2, through wry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+# Keep the web inspector available in release builds. On macOS this uses a
+# private API, which the Mac App Store does not accept.
+devtools = ["wry/devtools"]
+
+[dependencies]
+polybrowser-core = { workspace = true }
+raw-window-handle = { workspace = true }
+wry = { workspace = true }

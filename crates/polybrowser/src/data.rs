@@ -6,7 +6,7 @@ use polybrowser_core::{Cookie, Engine, Error, Profile, Result};
 /// view. An ephemeral profile is a no-op.
 ///
 /// The callback runs on the main thread, asynchronously. Call this on the main
-/// thread (otherwise [`Error::NotMainThread`]). Only the WebKit engine on macOS
+/// thread (otherwise [`Error::NotMainThread`]). The WebKit engine on macOS and Linux
 /// is supported; other engines report [`Error::Unsupported`].
 pub fn clear_site_data(
     engine: Engine,

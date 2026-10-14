@@ -79,6 +79,7 @@ return "not json";
 
 /// A page that is green all over, so a snapshot of it shows whether it was
 /// really painted.
+#[cfg(target_os = "macos")]
 const GREEN_PAGE: &str = "<!doctype html><body style=\"background: rgb(0, 160, 0)\">";
 
 /// A host the test's cookies are set for but never sent to.
@@ -184,6 +185,7 @@ enum Probe {
     NumberScript(polybrowser::Result<String>),
     TamperedScript(polybrowser::Result<String>),
     Snapshot(polybrowser::Result<Shape>),
+    #[cfg(target_os = "macos")]
     NestedLoaded,
     NestedSnapshot(polybrowser::Result<Shape>),
     Find(polybrowser::Result<bool>),
@@ -565,6 +567,7 @@ impl App {
                 Probe::NumberScript(r) => self.features.number_script = Some(r),
                 Probe::TamperedScript(r) => self.features.tampered_script = Some(r),
                 Probe::Snapshot(r) => self.features.snapshot = r.ok(),
+                #[cfg(target_os = "macos")]
                 Probe::NestedLoaded => self.features.nested_loaded = true,
                 Probe::NestedSnapshot(r) => self.features.nested_snapshot = Some(r),
                 Probe::Find(r) => self.features.find = r.ok(),

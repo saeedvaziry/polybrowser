@@ -11,6 +11,7 @@ rust-version = "1.85"
 [workspace.dependencies]
 polybrowser = { version = "0.1.0", path = "crates/polybrowser", default-features = false }
 polybrowser-core = { version = "0.1.0", path = "crates/polybrowser-core" }
+polybrowser-webkitgtk = { version = "0.1.0", path = "crates/polybrowser-webkitgtk" }
 polybrowser-wry = { version = "0.1.0", path = "crates/polybrowser-wry" }
 polybrowser-cef = { version = "0.1.0", path = "crates/polybrowser-cef" }
 

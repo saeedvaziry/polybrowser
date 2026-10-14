@@ -98,6 +98,7 @@ pub(super) fn read_cookies(browser: ExternalBrowser, profile: &Path) -> Result<V
 }
 
 /// A row of the `cookies` table, before its value is decrypted.
+#[cfg(any(target_os = "macos", test))]
 struct RawCookie {
     name: String,
     encrypted_value: Vec<u8>,
@@ -109,6 +110,7 @@ struct RawCookie {
     expires_utc: i64,
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn read_raw_cookies(database: &Path) -> Result<Vec<RawCookie>> {
     let snapshot = snapshot(database)?;
     let mut statement = snapshot.connection.prepare(
@@ -131,12 +133,14 @@ fn read_raw_cookies(database: &Path) -> Result<Vec<RawCookie>> {
 }
 
 /// `expires_utc` is microseconds since 1601; `0` means a session cookie.
+#[cfg(any(target_os = "macos", test))]
 fn cookie_expiry(expires_utc: i64) -> Option<Timestamp> {
     (expires_utc != 0).then(|| Timestamp::from_webkit_micros(expires_utc))
 }
 
 /// The login-keychain generic password item each browser keeps its cookie key
 /// in: `(service, account)`.
+#[cfg(any(target_os = "macos", test))]
 fn safe_storage(browser: ExternalBrowser) -> Option<(&'static str, &'static str)> {
     Some(match browser {
         ExternalBrowser::Chrome => ("Chrome Safe Storage", "Chrome"),
@@ -402,6 +406,7 @@ pub(super) mod tests {
         );
 
         assert_eq!(raw[1].value, "kept");
+        assert_eq!(raw[1].path, "/app");
         assert!(raw[1].encrypted_value.is_empty());
         assert_eq!(
             cookie_expiry(raw[1].expires_utc),

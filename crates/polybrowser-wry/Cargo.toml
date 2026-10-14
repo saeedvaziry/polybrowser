@@ -38,3 +38,7 @@ objc2-web-kit = { workspace = true, features = [
     "WKPDFConfiguration", "WKError", "WKScriptMessage", "WKScriptMessageHandler",
     "WKUserContentController", "block2", "objc2-app-kit",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+polybrowser-webkitgtk.workspace = true
+gtk = "0.18"

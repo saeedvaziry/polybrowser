@@ -53,12 +53,12 @@ layer (profiles, history, bookmarks, import, export) and pulls in no web view.
 | Platform | WebKit / WebView2                     | Chromium                  |
 |----------|---------------------------------------|---------------------------|
 | macOS    | works, covered by the self-test       | works, covered by the self-test |
-| Linux    | written, never compiled or run        | not implemented           |
+| Linux    | builds on Ubuntu 24.04 ARM64; native browser operations exercised in Muxy engine tests | not implemented |
 | Windows  | written, never compiled or run        | not implemented           |
 
 The system web views go through [wry](https://github.com/tauri-apps/wry), which
 supports all three platforms, and the platform-specific code here is small.
-But it has only been built and tested on macOS (arm64). On Linux wry needs GTK
+The native host integration has also been tested on Ubuntu 24.04 ARM64. On Linux wry needs GTK
 initialised and an X11 window. Chromium needs platform code for the child
 window and the helper processes; only the macOS half exists.
 
@@ -143,7 +143,9 @@ reports `LoadFailed`, `ProgressChanged`, `NavigationStateChanged`,
 `ExternalLinkRequested` (the user clicked a `mailto:`, `tel:` or similar link
 the engine cannot open, for the application to hand to the OS).
 
-These features are implemented for WebKit on macOS. `ExternalProfile::read_cookies`
+Scripts, snapshots, find and cookie operations are implemented for WebKit on macOS
+and Linux (WebKitGTK 4.1, version 2.42+). The extra native event observers above
+remain macOS-specific; a custom Linux host can provide its own observers. `ExternalProfile::read_cookies`
 also reads cookies from the installed browsers, decrypting the Chromium family's
 with the key from the macOS login keychain.
 
@@ -248,3 +250,19 @@ An engine is an implementation of `polybrowser::backend::EngineBackend`.
 - By default a link that wants a new window loads in the same view. Set
   `NewWindowPolicy::Block` and handle `BrowserEvent::NewWindowRequested` to
   open a tab instead.
+
+## A custom Linux host
+
+Enable `webkit-dynamic` with `default-features = false` to use
+`polybrowser::webkitgtk::{NativeView, SiteData}` with a native GTK host. These
+operations load WebKitGTK and its supporting libraries at runtime, so applications
+can still start without the engine installed. They do not initialize GTK, create
+views, or drive its event loop. The host retains responsibility for those tasks,
+input, rendering, navigation policy and browser events. `from_raw` retains the
+native object; all use and drop must stay on its GTK thread.
+
+The Wry Linux backend uses these same operations. Scripts and snapshots are
+cancelled on document navigation or view destruction, limited to 128 pending
+requests per view, and time out after 60 seconds. Snapshots temporarily map hidden
+views in a GTK offscreen window and return straight RGBA pixels. Closing the last
+view releases its shared persistent profile context.

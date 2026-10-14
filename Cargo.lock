@@ -2375,6 +2375,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "polybrowser-cef",
  "polybrowser-core",
+ "polybrowser-webkitgtk",
  "polybrowser-wry",
  "raw-window-handle",
  "tempfile",
@@ -2430,15 +2431,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "polybrowser-webkitgtk"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "polybrowser-core",
+ "serde_json",
+]
+
+[[package]]
 name = "polybrowser-wry"
 version = "0.1.0"
 dependencies = [
  "block2 0.6.2",
+ "gtk",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "objc2-web-kit",
  "polybrowser-core",
+ "polybrowser-webkitgtk",
  "raw-window-handle",
  "wry",
 ]

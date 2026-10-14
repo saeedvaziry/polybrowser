@@ -1,0 +1,11 @@
+[package]
+name = "polybrowser-webkitgtk"
+description = "Runtime-loaded WebKitGTK browser operations"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+polybrowser-core.workspace = true
+libloading = "0.8"
+serde_json.workspace = true

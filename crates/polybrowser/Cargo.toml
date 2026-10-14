@@ -8,6 +8,7 @@ keywords = ["browser", "webview", "chromium", "webkit", "gui"]
 categories = ["gui", "web-programming"]
 
 [features]
+webkit-dynamic = ["dep:polybrowser-webkitgtk"]
 default = ["webkit", "webview2"]
 # WebKit as shipped by the system: WKWebView on macOS, WebKitGTK on Linux.
 webkit = ["dep:polybrowser-wry"]
@@ -39,3 +40,6 @@ objc2-foundation = { workspace = true, features = ["NSGeometry"] }
 [[example]]
 name = "chromium"
 required-features = ["chromium"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+polybrowser-webkitgtk = { workspace = true, optional = true }

@@ -26,6 +26,9 @@ use wry::{
 #[cfg(target_os = "macos")]
 mod webkit;
 
+#[cfg(target_os = "linux")]
+mod webkitgtk;
+
 /// The engine behind the system web view on the platform being compiled for.
 pub const ENGINE: Engine = if cfg!(target_os = "windows") {
     Engine::WebView2
@@ -192,6 +195,8 @@ impl EngineBackend for WryBackend {
         Ok(Box::new(WryView {
             #[cfg(target_os = "macos")]
             _observers: observers,
+            #[cfg(target_os = "linux")]
+            native: webkitgtk::native(&webview)?,
             webview,
             _context: context,
         }))
@@ -268,6 +273,8 @@ struct WryView {
     /// Native observers, declared first so they detach before the view goes.
     #[cfg(target_os = "macos")]
     _observers: webkit::Observers,
+    #[cfg(target_os = "linux")]
+    native: webkitgtk::NativeView,
     webview: Rc<WebView>,
     /// Declared after the view so that it is dropped after it: wry wants a
     /// context to outlive the views created from it.
@@ -320,7 +327,15 @@ impl ViewBackend for WryView {
     }
 
     fn set_visible(&self, visible: bool) -> Result<()> {
-        self.webview.set_visible(visible).map_err(error)
+        #[cfg(target_os = "linux")]
+        {
+            self.native.set_visible(visible);
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.webview.set_visible(visible).map_err(error)
+        }
     }
 
     fn focus(&self) -> Result<()> {
@@ -364,14 +379,29 @@ impl ViewBackend for WryView {
         self.webview.clear_all_browsing_data().map_err(error)
     }
 
+    #[cfg(target_os = "linux")]
+    fn run_script(&self, body: &str, done: Done<String>) -> Result<()> {
+        self.native.run_script(body, done)
+    }
+
     #[cfg(target_os = "macos")]
     fn run_script(&self, body: &str, done: Done<String>) -> Result<()> {
         webkit::run_script(&self.webview, body, done)
     }
 
+    #[cfg(target_os = "linux")]
+    fn snapshot(&self, done: Done<Image>) -> Result<()> {
+        self.native.snapshot(done)
+    }
+
     #[cfg(target_os = "macos")]
     fn snapshot(&self, done: Done<Image>) -> Result<()> {
         webkit::snapshot(&self.webview, done)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn find(&self, query: &str, options: FindOptions, done: Done<bool>) -> Result<()> {
+        self.native.find(query, options, done)
     }
 
     #[cfg(target_os = "macos")]
@@ -386,9 +416,19 @@ impl ViewBackend for WryView {
             .map_err(error)
     }
 
+    #[cfg(target_os = "linux")]
+    fn cookies(&self, url: Option<&str>, done: Done<Vec<Cookie>>) -> Result<()> {
+        self.native.cookies(url, done)
+    }
+
     #[cfg(target_os = "macos")]
     fn cookies(&self, url: Option<&str>, done: Done<Vec<Cookie>>) -> Result<()> {
         webkit::cookies(&self.webview, url, done)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_cookie(&self, cookie: Cookie, done: Done<()>) -> Result<()> {
+        self.native.set_cookie(cookie, done)
     }
 
     #[cfg(target_os = "macos")]
@@ -396,9 +436,19 @@ impl ViewBackend for WryView {
         webkit::set_cookie(&self.webview, cookie, done)
     }
 
+    #[cfg(target_os = "linux")]
+    fn delete_cookies(&self, name: &str, domain: Option<&str>, done: Done<usize>) -> Result<()> {
+        self.native.delete_cookies(name, domain, done)
+    }
+
     #[cfg(target_os = "macos")]
     fn delete_cookies(&self, name: &str, domain: Option<&str>, done: Done<usize>) -> Result<()> {
         webkit::delete_cookies(&self.webview, name, domain, done)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clear_cookies(&self, done: Done<()>) -> Result<()> {
+        self.native.clear_cookies(done)
     }
 
     #[cfg(target_os = "macos")]
@@ -408,13 +458,17 @@ impl ViewBackend for WryView {
 }
 
 /// Clears cookies, caches and storage of a profile's data store in this
-/// engine, without a view. Main thread only; WebKit on macOS only.
+/// engine, without a view. GTK thread on Linux; main thread on macOS.
 pub fn clear_site_data(profile: &Profile, done: Done<()>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         webkit::clear_site_data(profile, done)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        webkitgtk::clear_site_data(profile, done)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (profile, done);
         Err(Error::unsupported("clear_site_data"))
@@ -422,13 +476,17 @@ pub fn clear_site_data(profile: &Profile, done: Done<()>) -> Result<()> {
 }
 
 /// Writes cookies into a profile's data store in this engine, without a view,
-/// and reports how many were written. Main thread only; WebKit on macOS only.
+/// and reports how many were written. GTK thread on Linux; main thread on macOS.
 pub fn import_cookies(profile: &Profile, cookies: Vec<Cookie>, done: Done<usize>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         webkit::import_cookies(profile, cookies, done)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        webkitgtk::import_cookies(profile, cookies, done)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (profile, cookies, done);
         Err(Error::unsupported("import_cookies"))
@@ -507,7 +565,12 @@ mod platform {
 /// Views of one profile share one context, and with it one cookie jar.
 #[cfg(not(target_os = "macos"))]
 mod platform {
-    use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
+    use std::{
+        cell::RefCell,
+        collections::HashMap,
+        path::Path,
+        rc::{Rc, Weak},
+    };
 
     use polybrowser_core::{backend::ProfileStorage, ProfileId};
     use wry::{WebContext, WebViewBuilder};
@@ -515,7 +578,7 @@ mod platform {
     pub(super) type SharedContext = Rc<RefCell<WebContext>>;
 
     thread_local! {
-        static CONTEXTS: RefCell<HashMap<ProfileId, SharedContext>> = RefCell::new(HashMap::new());
+        static CONTEXTS: RefCell<HashMap<ProfileId, Weak<RefCell<WebContext>>>> = RefCell::new(HashMap::new());
     }
 
     pub(super) fn context_for(storage: &ProfileStorage) -> Option<SharedContext> {
@@ -523,11 +586,14 @@ mod platform {
             return None;
         };
         Some(CONTEXTS.with(|contexts| {
-            contexts
-                .borrow_mut()
-                .entry(*id)
-                .or_insert_with(|| Rc::new(RefCell::new(WebContext::new(Some(data_dir.clone())))))
-                .clone()
+            let mut contexts = contexts.borrow_mut();
+            contexts.retain(|_, value| value.strong_count() > 0);
+            if let Some(context) = contexts.get(id).and_then(Weak::upgrade) {
+                return context;
+            }
+            let context = Rc::new(RefCell::new(WebContext::new(Some(data_dir.clone()))));
+            contexts.insert(*id, Rc::downgrade(&context));
+            context
         }))
     }
 

@@ -101,3 +101,7 @@ pub fn shutdown() {
     #[cfg(chromium_engine)]
     polybrowser_cef::shutdown();
 }
+
+/// Runtime-loaded browser operations for an application's native GTK host.
+#[cfg(all(feature = "webkit-dynamic", target_os = "linux"))]
+pub use polybrowser_webkitgtk as webkitgtk;

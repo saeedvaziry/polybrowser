@@ -1,10 +1,13 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
+
 /// A point in time, stored as microseconds since the Unix epoch (UTC).
 ///
 /// Browsers disagree about epochs and units; everything is normalised to this
 /// on the way in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct Timestamp(i64);
 
 /// Microseconds between 1601-01-01 (the epoch Chromium uses) and 1970-01-01.

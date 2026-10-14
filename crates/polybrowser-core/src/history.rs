@@ -39,6 +39,17 @@ pub struct HistoryEntry {
     pub last_visit: Timestamp,
 }
 
+/// How [`History::entries`] orders the pages it returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryOrder {
+    /// Most recently visited first. Best for a history list.
+    #[default]
+    Recent,
+    /// Most visited first, ties broken by most recent. Best for ranking
+    /// address-bar suggestions.
+    MostVisited,
+}
+
 /// Filter for [`History::entries`] and [`History::visits`]. The default
 /// matches everything.
 #[derive(Debug, Clone, Default)]
@@ -52,6 +63,8 @@ pub struct HistoryQuery {
     pub until: Option<Timestamp>,
     pub limit: Option<u32>,
     pub offset: u32,
+    /// How [`History::entries`] sorts its results.
+    pub order: HistoryOrder,
 }
 
 impl HistoryQuery {
@@ -81,6 +94,12 @@ impl HistoryQuery {
 
     pub fn offset(mut self, offset: u32) -> Self {
         self.offset = offset;
+        self
+    }
+
+    /// Sets how [`History::entries`] orders its results.
+    pub fn order(mut self, order: HistoryOrder) -> Self {
+        self.order = order;
         self
     }
 
@@ -178,16 +197,20 @@ impl History {
     /// Pages matching the query, most recently visited first. `since` and
     /// `until` apply to the last visit of each page.
     pub fn entries(&self, query: &HistoryQuery) -> Result<Vec<HistoryEntry>> {
+        let order_by = match query.order {
+            HistoryOrder::Recent => "last_visit_time DESC, id DESC",
+            HistoryOrder::MostVisited => "visit_count DESC, last_visit_time DESC, id DESC",
+        };
         let connection = self.store.lock();
-        let mut statement = connection.prepare_cached(
+        let mut statement = connection.prepare_cached(&format!(
             "SELECT url, title, visit_count, last_visit_time FROM urls
              WHERE visit_count > 0
                AND (?1 IS NULL OR url LIKE ?1 ESCAPE '\\' OR title LIKE ?1 ESCAPE '\\')
                AND (?2 IS NULL OR last_visit_time >= ?2)
                AND (?3 IS NULL OR last_visit_time < ?3)
-             ORDER BY last_visit_time DESC, id DESC
-             LIMIT ?4 OFFSET ?5",
-        )?;
+             ORDER BY {order_by}
+             LIMIT ?4 OFFSET ?5"
+        ))?;
         let rows = statement.query_map(
             params![
                 query.like_pattern(),
@@ -505,6 +528,30 @@ mod tests {
             .visits(&HistoryQuery::new().limit(1).offset(1))
             .unwrap();
         assert_eq!(paged[0].url, "https://example.com/100%_off");
+    }
+
+    #[test]
+    fn orders_by_visit_count_when_asked() {
+        let history = history();
+        // b is visited more often; a is visited more recently.
+        history
+            .add_visit(&visit("https://a.example/", "A", 500))
+            .unwrap();
+        for secs in [100, 200, 300] {
+            history
+                .add_visit(&visit("https://b.example/", "B", secs))
+                .unwrap();
+        }
+
+        let recent = history.entries(&HistoryQuery::new()).unwrap();
+        assert_eq!(recent[0].url, "https://a.example/", "recent is the default");
+
+        let ranked = history
+            .entries(&HistoryQuery::new().order(HistoryOrder::MostVisited))
+            .unwrap();
+        assert_eq!(ranked[0].url, "https://b.example/");
+        assert_eq!(ranked[0].visit_count, 3);
+        assert_eq!(ranked[1].url, "https://a.example/");
     }
 
     #[test]

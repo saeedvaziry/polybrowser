@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use super::ExternalProfile;
-use crate::{BookmarkNode, Result, Timestamp, Visit};
+use crate::{BookmarkNode, Cookie, Result, Timestamp, Visit};
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
@@ -23,6 +23,10 @@ mod imp {
 
     pub(in crate::import) fn read_bookmarks(_directory: &Path) -> Result<Vec<BookmarkNode>> {
         Err(Error::UnsupportedSource("Safari"))
+    }
+
+    pub(in crate::import) fn read_cookies(_directory: &Path) -> Result<Vec<Cookie>> {
+        Err(Error::UnsupportedSource("Safari cookies"))
     }
 }
 
@@ -72,6 +76,12 @@ mod imp {
             ))
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Safari encrypts cookies and stores them in a binary format macOS
+    /// protects; reading them is not supported.
+    pub(in crate::import) fn read_cookies(_directory: &Path) -> Result<Vec<Cookie>> {
+        Err(Error::UnsupportedSource("Safari cookies"))
     }
 
     pub(in crate::import) fn read_bookmarks(directory: &Path) -> Result<Vec<BookmarkNode>> {
@@ -246,4 +256,4 @@ mod imp {
     }
 }
 
-pub(super) use imp::{profiles, read_bookmarks, read_history};
+pub(super) use imp::{profiles, read_bookmarks, read_cookies, read_history};

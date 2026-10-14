@@ -55,15 +55,17 @@
 //! layer: profiles, history, bookmarks, import and export.
 
 mod browser;
+mod data;
 mod engines;
 
 pub use browser::{Browser, BrowserBuilder};
+pub use data::{clear_site_data, import_cookies};
 pub use engines::{default_engine, engines};
 pub use polybrowser_core::{
-    backend, import, is_recordable_url, Bookmark, BookmarkNode, Bookmarks, BrowserEvent, Engine,
-    Error, ExternalBrowser, ExternalProfile, History, HistoryEntry, HistoryFormat, HistoryQuery,
-    ImportOptions, ImportReport, NewWindowPolicy, Profile, ProfileId, ProfileManager, Rect, Result,
-    Timestamp, Visit,
+    backend, import, is_recordable_url, Bookmark, BookmarkNode, Bookmarks, BrowserEvent, Cookie,
+    Engine, Error, ExternalBrowser, ExternalProfile, FindOptions, History, HistoryEntry,
+    HistoryFormat, HistoryOrder, HistoryQuery, Image, ImportOptions, ImportReport, NewWindowPolicy,
+    Profile, ProfileId, ProfileManager, Rect, Result, Timestamp, Visit,
 };
 pub use raw_window_handle;
 

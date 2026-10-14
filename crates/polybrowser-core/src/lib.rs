@@ -12,6 +12,7 @@
 
 pub mod backend;
 mod bookmarks;
+mod cookie;
 mod engine;
 mod error;
 mod event;
@@ -22,14 +23,17 @@ pub mod import;
 mod profile;
 mod store;
 mod time;
+mod view;
 
 pub use bookmarks::{Bookmark, BookmarkNode, Bookmarks};
+pub use cookie::Cookie;
 pub use engine::Engine;
 pub use error::{Error, Result};
 pub use event::{BrowserEvent, NewWindowPolicy};
 pub use export::HistoryFormat;
 pub use geometry::Rect;
-pub use history::{is_recordable_url, History, HistoryEntry, HistoryQuery, Visit};
+pub use history::{is_recordable_url, History, HistoryEntry, HistoryOrder, HistoryQuery, Visit};
 pub use import::{ExternalBrowser, ExternalProfile, ImportOptions, ImportReport};
 pub use profile::{Profile, ProfileId, ProfileManager};
 pub use time::Timestamp;
+pub use view::{FindOptions, Image};

@@ -7,9 +7,10 @@ use std::{
 };
 
 use super::{non_empty, snapshot, ExternalBrowser, ExternalProfile};
-use crate::{BookmarkNode, Result, Timestamp, Visit};
+use crate::{BookmarkNode, Cookie, Result, Timestamp, Visit};
 
 const PLACES_FILE: &str = "places.sqlite";
+const COOKIES_FILE: &str = "cookies.sqlite";
 
 /// Profiles listed in the `profiles.ini` of a Firefox data directory.
 pub(super) fn profiles(root: &Path) -> Vec<ExternalProfile> {
@@ -105,6 +106,28 @@ pub(super) fn read_history(profile: &Path, since: Option<Timestamp>) -> Result<V
             non_empty(row.get(1)?),
             Timestamp::from_unix_micros(row.get(2)?),
         ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Firefox keeps cookies unencrypted in `cookies.sqlite`.
+pub(super) fn read_cookies(profile: &Path) -> Result<Vec<Cookie>> {
+    let snapshot = snapshot(&profile.join(COOKIES_FILE))?;
+    let mut statement = snapshot
+        .connection
+        .prepare("SELECT name, value, host, path, isSecure, isHttpOnly, expiry FROM moz_cookies")?;
+    let rows = statement.query_map([], |row| {
+        // `expiry` is seconds since the Unix epoch; 0 means a session cookie.
+        let expiry: i64 = row.get(6)?;
+        Ok(Cookie {
+            name: row.get(0)?,
+            value: row.get(1)?,
+            domain: row.get(2)?,
+            path: row.get(3)?,
+            secure: row.get::<_, i64>(4)? != 0,
+            http_only: row.get::<_, i64>(5)? != 0,
+            expires: (expiry != 0).then(|| Timestamp::from_unix_secs(expiry)),
+        })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -273,6 +296,32 @@ mod tests {
             roots[1].children[0].children[0].url.as_deref(),
             Some("https://example.com/")
         );
+    }
+
+    #[test]
+    fn reads_unencrypted_cookies() {
+        let dir = tempfile::tempdir().unwrap();
+        Connection::open(dir.path().join(COOKIES_FILE))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE moz_cookies (id INTEGER PRIMARY KEY, name TEXT, value TEXT,
+                     host TEXT, path TEXT, expiry INTEGER, isSecure INTEGER, isHttpOnly INTEGER);
+                 INSERT INTO moz_cookies (name, value, host, path, expiry, isSecure, isHttpOnly)
+                 VALUES ('sid', 'abc', '.mozilla.org', '/', 1900000000, 1, 1),
+                        ('tmp', 'x', 'example.com', '/', 0, 0, 0);",
+            )
+            .unwrap();
+        let cookies = read_cookies(dir.path()).unwrap();
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].name, "sid");
+        assert_eq!(cookies[0].value, "abc");
+        assert_eq!(cookies[0].domain, ".mozilla.org");
+        assert!(cookies[0].secure && cookies[0].http_only);
+        assert_eq!(
+            cookies[0].expires,
+            Some(Timestamp::from_unix_secs(1_900_000_000))
+        );
+        assert_eq!(cookies[1].expires, None);
     }
 
     #[test]

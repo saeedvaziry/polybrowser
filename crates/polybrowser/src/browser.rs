@@ -8,8 +8,8 @@ use polybrowser_core::{
     backend::{
         EngineBackend, EventSink, NavigationFilter, ProfileStorage, ViewBackend, ViewConfig,
     },
-    is_recordable_url, BrowserEvent, Engine, Error, History, NewWindowPolicy, Profile, Rect,
-    Result,
+    is_recordable_url, BrowserEvent, Cookie, Engine, Error, FindOptions, History, Image,
+    NewWindowPolicy, Profile, Rect, Result,
 };
 use raw_window_handle::HasWindowHandle;
 
@@ -217,6 +217,80 @@ impl Browser {
     /// [`History::clear`].
     pub fn clear_browsing_data(&self) -> Result<()> {
         self.view.clear_browsing_data()
+    }
+
+    /// Runs `body` as the body of an async JavaScript function in the page's
+    /// main frame and content world, and reports the JSON text of its return
+    /// value (`undefined` becomes `"null"`).
+    ///
+    /// `body` may use `await` and `return`. A thrown exception or rejected
+    /// promise becomes [`Error::Script`]. The callback runs on the main thread,
+    /// asynchronously.
+    pub fn run_script(
+        &self,
+        body: &str,
+        done: impl FnOnce(Result<String>) + 'static,
+    ) -> Result<()> {
+        self.view.run_script(body, Box::new(done))
+    }
+
+    /// Captures the view as an [`Image`]. Works while the view, or a view it
+    /// sits in, is hidden. The callback runs on the main thread,
+    /// asynchronously, and reports an error if the capture takes too long. A
+    /// view that has no size yet is an error straight away.
+    pub fn snapshot(&self, done: impl FnOnce(Result<Image>) + 'static) -> Result<()> {
+        self.view.snapshot(Box::new(done))
+    }
+
+    /// Finds `query` in the page, selecting and highlighting the match. The
+    /// callback reports whether a match was found.
+    pub fn find(
+        &self,
+        query: &str,
+        options: FindOptions,
+        done: impl FnOnce(Result<bool>) + 'static,
+    ) -> Result<()> {
+        self.view.find(query, options, Box::new(done))
+    }
+
+    /// Removes the selection and highlight left by [`find`](Self::find).
+    pub fn clear_find(&self) -> Result<()> {
+        self.view.clear_find()
+    }
+
+    /// Reports the cookies of this view's profile store. With `url`, only the
+    /// cookies that would be sent to it (domain, path and `secure` match).
+    pub fn cookies(
+        &self,
+        url: Option<&str>,
+        done: impl FnOnce(Result<Vec<Cookie>>) + 'static,
+    ) -> Result<()> {
+        self.view.cookies(url, Box::new(done))
+    }
+
+    /// Stores a cookie in this view's profile store, honoring `http_only`.
+    pub fn set_cookie(
+        &self,
+        cookie: Cookie,
+        done: impl FnOnce(Result<()>) + 'static,
+    ) -> Result<()> {
+        self.view.set_cookie(cookie, Box::new(done))
+    }
+
+    /// Deletes every cookie called `name` (and with exactly `domain`, if given)
+    /// from this view's profile store, reporting how many were removed.
+    pub fn delete_cookies(
+        &self,
+        name: &str,
+        domain: Option<&str>,
+        done: impl FnOnce(Result<usize>) + 'static,
+    ) -> Result<()> {
+        self.view.delete_cookies(name, domain, Box::new(done))
+    }
+
+    /// Deletes every cookie of this view's profile store.
+    pub fn clear_cookies(&self, done: impl FnOnce(Result<()>) + 'static) -> Result<()> {
+        self.view.clear_cookies(Box::new(done))
     }
 }
 

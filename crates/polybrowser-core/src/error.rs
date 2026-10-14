@@ -21,6 +21,15 @@ pub enum Error {
     #[error("{engine} backend: {message}")]
     Backend { engine: Engine, message: String },
 
+    /// An operation the current engine or backend does not support.
+    #[error("unsupported by this backend: {0}")]
+    Unsupported(&'static str),
+
+    /// JavaScript run with [`Browser::run_script`](crate::backend::ViewBackend::run_script)
+    /// threw an exception or returned a rejected promise.
+    #[error("script error: {0}")]
+    Script(String),
+
     #[error("the window handle is of a kind the {0} engine cannot embed into")]
     UnsupportedWindowHandle(Engine),
 
@@ -71,5 +80,11 @@ impl Error {
             engine,
             message: message.to_string(),
         }
+    }
+
+    /// Shorthand for an operation a backend does not implement. `operation`
+    /// names what was attempted.
+    pub fn unsupported(operation: &'static str) -> Self {
+        Error::Unsupported(operation)
     }
 }

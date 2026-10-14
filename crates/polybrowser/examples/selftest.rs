@@ -6,21 +6,30 @@
 //!
 //! Opens a window for a few seconds and browses pages from a server it starts
 //! on localhost, so it needs no network. It verifies that events arrive, that
-//! history is recorded (including an address changed with `pushState`), that
-//! a profile keeps its cookies between views and that another profile does
-//! not see them, and that the page inspector opens and closes. The exit status
-//! is zero if everything held.
+//! history is recorded (including an address changed with `pushState`), that a
+//! profile keeps its cookies between views and that another profile does not
+//! see them, that the page inspector opens and closes, and that the extra view
+//! features work: running a script with a result, snapshotting a hidden view
+//! (hidden itself or through its parent), find-in-page, the cookie store
+//! (host-only and domain cookies, and importing into a profile), and the
+//! `LoadFailed`, `ProgressChanged`, `NavigationStateChanged`, `FaviconChanged`
+//! and `CloseRequested` events, the last one from the main frame only. The
+//! exit status is zero if everything held.
 
 use std::{
+    cell::Cell,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     process::ExitCode,
+    rc::Rc,
+    sync::mpsc::{Receiver, Sender},
     thread,
     time::{Duration, Instant},
 };
 
 use polybrowser::{
-    Browser, BrowserEvent, Engine, HistoryFormat, HistoryQuery, Profile, ProfileManager, Rect,
+    Browser, BrowserEvent, Cookie, Engine, FindOptions, HistoryFormat, HistoryQuery, Profile,
+    ProfileManager, Rect,
 };
 use winit::{
     application::ApplicationHandler,
@@ -41,6 +50,39 @@ const FIRST_PAGE: &str = r#"<!doctype html><title>One</title><p>First page
     }, 300);
   });
 </script>"#;
+
+const FEATURE_PAGE: &str = r#"<!doctype html><title>Feature</title>
+<link rel="icon" href="/favicon.ico">
+<style>body { background: rgb(0, 160, 0); }</style>
+<p>a needle hidden in the haystack
+<iframe src="/frame" style="width: 1px; height: 1px; border: 0"></iframe>"#;
+
+/// A frame inside the feature page that tries every way to close the view;
+/// none may work.
+const FRAME_PAGE: &str = r#"<!doctype html><script>
+  try { window.close(); } catch (error) {}
+  try { window.webkit.messageHandlers.polybrowserClose.postMessage(null); } catch (error) {}
+  try { window.webkit.messageHandlers.ipc.postMessage("polybrowser:close-requested"); } catch (error) {}
+</script>"#;
+
+/// A script whose page has replaced `JSON.stringify`, so its result comes back
+/// as a number instead of JSON text.
+const TAMPERED_SCRIPT: &str = r#"
+const original = JSON.stringify;
+JSON.stringify = function (value) {
+  if (value !== "not json") return original.apply(JSON, arguments);
+  JSON.stringify = original;
+  return 5;
+};
+return "not json";
+"#;
+
+/// A page that is green all over, so a snapshot of it shows whether it was
+/// really painted.
+const GREEN_PAGE: &str = "<!doctype html><body style=\"background: rgb(0, 160, 0)\">";
+
+/// A host the test's cookies are set for but never sent to.
+const COOKIE_HOST: &str = "example.test";
 
 /// Starts the server the test browses and returns its origin.
 fn serve() -> std::io::Result<String> {
@@ -90,6 +132,8 @@ fn respond(mut stream: TcpStream) -> std::io::Result<()> {
             "",
             "<!doctype html><title>Two</title><p>Second page".to_owned(),
         ),
+        "/feature" => ("200 OK", "", FEATURE_PAGE.to_owned()),
+        "/frame" => ("200 OK", "", FRAME_PAGE.to_owned()),
         // Reports the cookies the browser sent, where the test can read them.
         "/whoami" => (
             "200 OK",
@@ -118,12 +162,147 @@ enum Step {
     OtherProfile,
     InspectorOpening,
     InspectorClosing,
+    Features,
+}
+
+/// The width, height and byte count of a snapshot, and whether its middle
+/// pixel has the green of the pages it is taken of.
+type Shape = (u32, u32, usize, bool);
+
+fn shape(image: polybrowser::Image) -> Shape {
+    let middle = ((image.height / 2 * image.width + image.width / 2) * 4) as usize;
+    let green = image
+        .rgba
+        .get(middle..middle + 4)
+        .is_some_and(|pixel| pixel[0] < 40 && pixel[1] > 120 && pixel[2] < 40);
+    (image.width, image.height, image.rgba.len(), green)
+}
+
+/// Results of the asynchronous view operations, delivered from their callbacks.
+enum Probe {
+    Script(polybrowser::Result<String>),
+    NumberScript(polybrowser::Result<String>),
+    TamperedScript(polybrowser::Result<String>),
+    Snapshot(polybrowser::Result<Shape>),
+    NestedLoaded,
+    NestedSnapshot(polybrowser::Result<Shape>),
+    Find(polybrowser::Result<bool>),
+    CookieSet(polybrowser::Result<()>),
+    CookiesGot(polybrowser::Result<Vec<Cookie>>),
+    SubdomainCookiesGot(polybrowser::Result<Vec<Cookie>>),
+    CookiesDeleted(polybrowser::Result<usize>),
+    CookiesCleared(polybrowser::Result<()>),
+    /// The result of a profile-level operation, and whether the call had
+    /// returned before its callback ran.
+    Imported(polybrowser::Result<usize>, bool),
+    ImportedEphemeral(polybrowser::Result<usize>, bool),
+    ClearedEphemeral(polybrowser::Result<()>, bool),
+}
+
+/// The cookies the probe sets: one host-only for the test server, which the
+/// view must send there, and a host-only and a domain cookie for
+/// [`COOKIE_HOST`], whose scope must survive the store.
+fn probe_cookies() -> [Cookie; 3] {
+    let cookie = |name: &str, domain: &str, http_only: bool| Cookie {
+        name: name.into(),
+        value: "1".into(),
+        domain: domain.into(),
+        path: "/".into(),
+        secure: false,
+        http_only,
+        expires: None,
+    };
+    [
+        cookie("probe", "127.0.0.1", true),
+        cookie("hostonly", COOKIE_HOST, false),
+        cookie("dotted", &format!(".{COOKIE_HOST}"), false),
+    ]
+}
+
+/// Tracks the feature-checking phase.
+#[derive(Default)]
+struct Features {
+    /// The hidden view the checks run against, created hidden and never shown.
+    probe: Option<Browser>,
+    /// A visible view inside a hidden parent view, the way an application
+    /// keeps a tab it is not showing.
+    nested: Option<Browser>,
+    /// A view pointed at an unreachable port, to force `LoadFailed`.
+    unreachable: Option<Browser>,
+    started: bool,
+    kicked_off: bool,
+    whoami_sent: bool,
+    get_sent: bool,
+    delete_sent: bool,
+    clear_sent: bool,
+    finished_ops: bool,
+    nested_loaded: bool,
+    nested_snapshot_sent: bool,
+    empty_snapshot_refused: bool,
+    script: Option<String>,
+    number_script: Option<polybrowser::Result<String>>,
+    tampered_script: Option<polybrowser::Result<String>>,
+    snapshot: Option<Shape>,
+    nested_snapshot: Option<polybrowser::Result<Shape>>,
+    find: Option<bool>,
+    cookies_set: usize,
+    cookie_set_failed: bool,
+    /// The title of `/whoami` in the probe, listing the cookies it sent.
+    sent_cookies: Option<String>,
+    cookies_got: Option<Vec<Cookie>>,
+    subdomain_cookies: Option<Vec<Cookie>>,
+    cookies_deleted: Option<usize>,
+    cookies_cleared: bool,
+    imported: Option<(polybrowser::Result<usize>, bool)>,
+    imported_ephemeral: Option<(polybrowser::Result<usize>, bool)>,
+    cleared_ephemeral: Option<(polybrowser::Result<()>, bool)>,
+}
+
+/// A plain `NSView` added to the window and hidden.
+#[cfg(target_os = "macos")]
+struct HiddenParent(objc2::rc::Retained<objc2_app_kit::NSView>);
+
+#[cfg(target_os = "macos")]
+impl HiddenParent {
+    fn new(window: &Window, width: f64, height: f64) -> Option<Self> {
+        use objc2::MainThreadOnly;
+        use objc2_app_kit::NSView;
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+        let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
+            return None;
+        };
+        let mtm = objc2::MainThreadMarker::new()?;
+        // SAFETY: winit's handle points at the window's live content view.
+        let content = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+        let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
+        let view = NSView::initWithFrame(NSView::alloc(mtm), frame);
+        content.addSubview(&view);
+        view.setHidden(true);
+        Some(Self(view))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl raw_window_handle::HasWindowHandle for HiddenParent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        use raw_window_handle::{AppKitWindowHandle, RawWindowHandle, WindowHandle};
+        let view = std::ptr::NonNull::from(&*self.0).cast();
+        let raw = RawWindowHandle::AppKit(AppKitWindowHandle::new(view));
+        // SAFETY: the view lives as long as `self`.
+        Ok(unsafe { WindowHandle::borrow_raw(raw) })
+    }
 }
 
 struct App {
     engine: Engine,
     origin: String,
     proxy: EventLoopProxy<BrowserEvent>,
+    probe_tx: Sender<Probe>,
+    probe_rx: Receiver<Probe>,
     main_profile: Profile,
     other_profile: Profile,
     step: Step,
@@ -131,6 +310,7 @@ struct App {
     events: Vec<BrowserEvent>,
     failures: Vec<String>,
     completed: bool,
+    features: Features,
     // Declared before the window so that it is dropped first.
     browser: Option<Browser>,
     window: Option<Window>,
@@ -150,6 +330,11 @@ impl App {
 
     fn saw(&self, event: &BrowserEvent) -> bool {
         self.events.contains(event)
+    }
+
+    /// Whether an event of the given shape was seen, ignoring its payload.
+    fn saw_kind(&self, matches: impl Fn(&BrowserEvent) -> bool) -> bool {
+        self.events.iter().any(matches)
     }
 
     /// Replaces the current view with a new one on `profile`.
@@ -229,6 +414,394 @@ impl App {
             "the history can be exported",
         );
     }
+
+    /// Opens a hidden view and starts the asynchronous feature checks.
+    fn start_features(&mut self) {
+        self.step = Step::Features;
+        self.features.started = true;
+        let window = self.window.as_ref().expect("the window exists");
+        let proxy = self.proxy.clone();
+        let probe = Browser::builder()
+            .engine(self.engine)
+            .profile(&self.main_profile.clone())
+            .url(self.url("/feature"))
+            .visible(false) // created hidden and never shown
+            .on_event(move |event| {
+                let _ = proxy.send_event(event);
+            })
+            .build(window, Rect::new(0.0, 0.0, 480.0, 320.0));
+        match probe {
+            Ok(probe) => self.features.probe = Some(probe),
+            Err(error) => self.failures.push(format!("hidden view failed: {error}")),
+        }
+
+        // A view with no size has nothing to capture, and must say so.
+        let empty = Browser::builder()
+            .engine(self.engine)
+            .html("<p>empty")
+            .visible(false)
+            .build(window, Rect::new(0.0, 0.0, 0.0, 0.0));
+        self.features.empty_snapshot_refused =
+            empty.is_ok_and(|empty| empty.snapshot(|_| {}).is_err());
+
+        self.open_nested();
+    }
+
+    /// Opens a visible view inside a hidden parent view, reporting its load
+    /// through the probe channel.
+    #[cfg(target_os = "macos")]
+    fn open_nested(&mut self) {
+        let window = self.window.as_ref().expect("the window exists");
+        let Some(parent) = HiddenParent::new(window, 480.0, 320.0) else {
+            self.failures.push("no hidden parent view".to_owned());
+            return;
+        };
+        let tx = self.probe_tx.clone();
+        let nested = Browser::builder()
+            .engine(self.engine)
+            .html(GREEN_PAGE)
+            .on_event(move |event| {
+                if matches!(event, BrowserEvent::LoadFinished { .. }) {
+                    let _ = tx.send(Probe::NestedLoaded);
+                }
+            })
+            .build(&parent, Rect::new(0.0, 0.0, 480.0, 320.0));
+        match nested {
+            Ok(nested) => self.features.nested = Some(nested),
+            Err(error) => self.failures.push(format!("nested view failed: {error}")),
+        }
+    }
+
+    /// Only macOS has a parent view to hide here.
+    #[cfg(not(target_os = "macos"))]
+    fn open_nested(&mut self) {
+        self.features.nested_snapshot = Some(Ok((1, 1, 4, true)));
+    }
+
+    /// Fires the view operations once the hidden page has loaded.
+    fn kick_off_features(&mut self) {
+        self.features.kicked_off = true;
+        let Some(probe) = self.features.probe.as_ref() else {
+            return;
+        };
+
+        let tx = self.probe_tx.clone();
+        let _ = probe.run_script(
+            "return await new Promise(function (r) { setTimeout(function () { r(6 * 7); }, 10); });",
+            move |result| drop(tx.send(Probe::Script(result))),
+        );
+        let tx = self.probe_tx.clone();
+        let _ = probe.run_script("return 5;", move |result| {
+            drop(tx.send(Probe::NumberScript(result)))
+        });
+        let tx = self.probe_tx.clone();
+        let _ = probe.run_script(TAMPERED_SCRIPT, move |result| {
+            drop(tx.send(Probe::TamperedScript(result)))
+        });
+        let tx = self.probe_tx.clone();
+        let _ = probe.snapshot(move |result| {
+            let _ = tx.send(Probe::Snapshot(result.map(shape)));
+        });
+        let tx = self.probe_tx.clone();
+        let _ = probe.find("needle", FindOptions::default(), move |result| {
+            drop(tx.send(Probe::Find(result)))
+        });
+
+        for cookie in probe_cookies() {
+            let tx = self.probe_tx.clone();
+            let _ = probe.set_cookie(cookie, move |result| {
+                drop(tx.send(Probe::CookieSet(result)))
+            });
+        }
+        self.start_profile_operations();
+    }
+
+    /// Imports a cookie into the probe's profile, and runs the operations
+    /// that have nothing to do for an ephemeral profile.
+    fn start_profile_operations(&mut self) {
+        let returned = Rc::new(Cell::new(false));
+        let imported = Cookie {
+            name: "imported".into(),
+            ..probe_cookies()[0].clone()
+        };
+        let (tx, seen) = (self.probe_tx.clone(), returned.clone());
+        let main = polybrowser::import_cookies(
+            self.engine,
+            &self.main_profile,
+            vec![imported],
+            move |r| drop(tx.send(Probe::Imported(r, seen.get()))),
+        );
+        let (tx, seen) = (self.probe_tx.clone(), returned.clone());
+        let ephemeral = polybrowser::import_cookies(
+            self.engine,
+            &Profile::ephemeral(),
+            probe_cookies().to_vec(),
+            move |r| drop(tx.send(Probe::ImportedEphemeral(r, seen.get()))),
+        );
+        let (tx, seen) = (self.probe_tx.clone(), returned.clone());
+        let cleared = polybrowser::clear_site_data(self.engine, &Profile::ephemeral(), move |r| {
+            drop(tx.send(Probe::ClearedEphemeral(r, seen.get())))
+        });
+        returned.set(true);
+
+        // An engine without these says so at once, and never calls back.
+        if let Err(error) = main {
+            self.features.imported = Some((Err(error), true));
+        }
+        if let Err(error) = ephemeral {
+            self.features.imported_ephemeral = Some((Err(error), true));
+        }
+        if let Err(error) = cleared {
+            self.features.cleared_ephemeral = Some((Err(error), true));
+        }
+    }
+
+    /// Drives the cookie operations in order as their results arrive, then the
+    /// `CloseRequested` and `LoadFailed` triggers.
+    fn advance_features(&mut self) {
+        while let Ok(result) = self.probe_rx.try_recv() {
+            match result {
+                Probe::Script(r) => self.features.script = r.ok(),
+                Probe::NumberScript(r) => self.features.number_script = Some(r),
+                Probe::TamperedScript(r) => self.features.tampered_script = Some(r),
+                Probe::Snapshot(r) => self.features.snapshot = r.ok(),
+                Probe::NestedLoaded => self.features.nested_loaded = true,
+                Probe::NestedSnapshot(r) => self.features.nested_snapshot = Some(r),
+                Probe::Find(r) => self.features.find = r.ok(),
+                Probe::CookieSet(r) => {
+                    self.features.cookies_set += 1;
+                    self.features.cookie_set_failed |= r.is_err();
+                }
+                Probe::CookiesGot(r) => self.features.cookies_got = r.ok(),
+                Probe::SubdomainCookiesGot(r) => self.features.subdomain_cookies = r.ok(),
+                Probe::CookiesDeleted(r) => self.features.cookies_deleted = r.ok(),
+                Probe::CookiesCleared(r) => self.features.cookies_cleared = r.is_ok(),
+                Probe::Imported(r, returned) => self.features.imported = Some((r, returned)),
+                Probe::ImportedEphemeral(r, returned) => {
+                    self.features.imported_ephemeral = Some((r, returned))
+                }
+                Probe::ClearedEphemeral(r, returned) => {
+                    self.features.cleared_ephemeral = Some((r, returned))
+                }
+            }
+        }
+
+        if self.features.nested_loaded && !self.features.nested_snapshot_sent {
+            self.features.nested_snapshot_sent = true;
+            if let Some(nested) = self.features.nested.as_ref() {
+                let tx = self.probe_tx.clone();
+                let sent = nested.snapshot(move |result| {
+                    let _ = tx.send(Probe::NestedSnapshot(result.map(shape)));
+                });
+                if let Err(error) = sent {
+                    self.features.nested_snapshot = Some(Err(error));
+                }
+            }
+        }
+
+        let Some(probe) = self.features.probe.as_ref() else {
+            return;
+        };
+
+        // The server lists the cookies it was sent in the page title. Leaving
+        // the page waits for the checks that run in it.
+        let page_checked = self.features.script.is_some()
+            && self.features.number_script.is_some()
+            && self.features.tampered_script.is_some()
+            && self.features.snapshot.is_some()
+            && self.features.find.is_some();
+        if page_checked
+            && self.features.cookies_set == probe_cookies().len()
+            && self.features.imported.is_some()
+            && !self.features.whoami_sent
+        {
+            self.features.whoami_sent = true;
+            let _ = probe.load_url(&self.url("/whoami"));
+        }
+        if self.features.sent_cookies.is_some() && !self.features.get_sent {
+            self.features.get_sent = true;
+            let tx = self.probe_tx.clone();
+            let _ = probe.cookies(None, move |r| drop(tx.send(Probe::CookiesGot(r))));
+            let tx = self.probe_tx.clone();
+            let subdomain = format!("http://sub.{COOKIE_HOST}/");
+            let _ = probe.cookies(Some(&subdomain), move |r| {
+                drop(tx.send(Probe::SubdomainCookiesGot(r)))
+            });
+        }
+        if self.features.cookies_got.is_some()
+            && self.features.subdomain_cookies.is_some()
+            && !self.features.delete_sent
+        {
+            self.features.delete_sent = true;
+            let tx = self.probe_tx.clone();
+            let _ = probe.delete_cookies("probe", None, move |r| {
+                drop(tx.send(Probe::CookiesDeleted(r)))
+            });
+        }
+        if self.features.cookies_deleted.is_some() && !self.features.clear_sent {
+            self.features.clear_sent = true;
+            let tx = self.probe_tx.clone();
+            let _ = probe.clear_cookies(move |r| drop(tx.send(Probe::CookiesCleared(r))));
+        }
+        if self.features.cookies_cleared && !self.features.finished_ops {
+            self.features.finished_ops = true;
+            // Ask the page to close itself, forcing `CloseRequested`.
+            let _ = probe.run_script("window.close(); return null;", |_| {});
+            // Navigate to a second page so the back list, and thus the
+            // navigation state, changes.
+            let _ = probe.load_url(&self.url("/two"));
+            // A view pointed at a closed port forces `LoadFailed`.
+            self.open_unreachable();
+        }
+    }
+
+    fn open_unreachable(&mut self) {
+        let window = self.window.as_ref().expect("the window exists");
+        let proxy = self.proxy.clone();
+        let failing = Browser::builder()
+            .engine(self.engine)
+            .profile(&self.main_profile.clone())
+            .url("http://127.0.0.1:1/")
+            .visible(false)
+            .on_event(move |event| {
+                let _ = proxy.send_event(event);
+            })
+            .build(window, Rect::new(0.0, 0.0, 480.0, 320.0));
+        if let Ok(failing) = failing {
+            self.features.unreachable = Some(failing);
+        }
+    }
+
+    /// Whether every feature result and event has arrived.
+    fn features_complete(&self) -> bool {
+        self.features.finished_ops
+            && self.features.script.is_some()
+            && self.features.number_script.is_some()
+            && self.features.tampered_script.is_some()
+            && self.features.snapshot.is_some()
+            && self.features.nested_snapshot.is_some()
+            && self.features.imported_ephemeral.is_some()
+            && self.features.cleared_ephemeral.is_some()
+            && self.features.find.is_some()
+            && self.features.cookies_got.is_some()
+            && self.features.cookies_deleted.is_some()
+            && self.features.cookies_cleared
+            && self.saw_kind(|event| matches!(event, BrowserEvent::LoadFailed { .. }))
+            && self.saw_kind(|event| matches!(event, BrowserEvent::CloseRequested))
+            && self.saw_kind(|event| matches!(event, BrowserEvent::ProgressChanged { .. }))
+            && self.saw_kind(|event| matches!(event, BrowserEvent::FaviconChanged { .. }))
+            && self.saw_kind(|event| matches!(event, BrowserEvent::NavigationStateChanged { .. }))
+    }
+
+    fn check_features(&mut self) {
+        let good = |(width, height, len, green): Shape| {
+            width > 0 && height > 0 && len == (width * height * 4) as usize && green
+        };
+        self.expect(
+            self.features.script.as_deref() == Some("42"),
+            "run_script returned the awaited promise's value",
+        );
+        self.expect(
+            matches!(&self.features.number_script, Some(Ok(json)) if json == "5"),
+            "run_script returned a number as JSON",
+        );
+        self.expect(
+            matches!(self.features.tampered_script, Some(Err(_))),
+            "a page whose JSON.stringify returns a number gets an error",
+        );
+        self.expect(
+            self.features.snapshot.is_some_and(good),
+            "a hidden view was snapshotted",
+        );
+        self.expect(
+            matches!(self.features.nested_snapshot, Some(Ok(shape)) if good(shape)),
+            "a view in a hidden parent was snapshotted",
+        );
+        self.expect(
+            self.features.empty_snapshot_refused,
+            "a view with no size refused to snapshot",
+        );
+        self.expect(self.features.find == Some(true), "find matched in the page");
+        self.expect(!self.features.cookie_set_failed, "the cookies were set");
+        let cookies = self.features.cookies_got.clone().unwrap_or_default();
+        let has = |cookies: &[Cookie], name: &str, domain: &str| {
+            cookies.iter().any(|c| c.name == name && c.domain == domain)
+        };
+        self.expect(
+            cookies.iter().any(|c| c.name == "probe" && c.http_only),
+            "a cookie set with http_only was read back",
+        );
+        let sent = self.features.sent_cookies.clone().unwrap_or_default();
+        let sent = sent.strip_prefix("cookies:").unwrap_or_default();
+        self.expect(
+            sent.split("; ").any(|c| c == "probe=1"),
+            "a host-only cookie was sent to its host",
+        );
+        self.expect(
+            has(&cookies, "hostonly", COOKIE_HOST),
+            "a host-only cookie stayed host-only",
+        );
+        self.expect(
+            has(&cookies, "dotted", &format!(".{COOKIE_HOST}")),
+            "a domain cookie kept its domain",
+        );
+        self.expect(
+            matches!(self.features.imported, Some((Ok(1), true)))
+                && sent.split("; ").any(|c| c == "imported=1"),
+            "import_cookies stored the cookie, then reported it",
+        );
+        self.expect(
+            matches!(self.features.imported_ephemeral, Some((Ok(0), true))),
+            "import_cookies into an ephemeral profile reported nothing, later",
+        );
+        self.expect(
+            matches!(self.features.cleared_ephemeral, Some((Ok(()), true))),
+            "clear_site_data of an ephemeral profile reported later",
+        );
+        let subdomain = self.features.subdomain_cookies.clone().unwrap_or_default();
+        self.expect(
+            subdomain.iter().any(|c| c.name == "dotted")
+                && !subdomain.iter().any(|c| c.name == "hostonly"),
+            "only the domain cookie applies to a subdomain",
+        );
+        self.expect(
+            self.features.cookies_deleted == Some(1),
+            "the cookie was deleted",
+        );
+        self.expect(
+            self.features.cookies_cleared,
+            "the cookie store was cleared",
+        );
+        self.expect(
+            self.saw_kind(|event| matches!(event, BrowserEvent::LoadFailed { .. })),
+            "LoadFailed was reported for an unreachable page",
+        );
+        let closes = self
+            .events
+            .iter()
+            .filter(|event| matches!(event, BrowserEvent::CloseRequested))
+            .count();
+        self.expect(
+            closes == 1,
+            "CloseRequested was reported for the main frame's window.close() only",
+        );
+        self.expect(
+            self.saw_kind(|event| matches!(event, BrowserEvent::ProgressChanged { .. })),
+            "ProgressChanged was reported",
+        );
+        self.expect(
+            self.saw_kind(|event| matches!(event, BrowserEvent::FaviconChanged { .. })),
+            "FaviconChanged was reported",
+        );
+        self.expect(
+            self.saw_kind(|event| matches!(event, BrowserEvent::NavigationStateChanged { .. })),
+            "NavigationStateChanged was reported",
+        );
+        self.completed = true;
+        self.features.probe = None;
+        self.features.nested = None;
+        self.features.unreachable = None;
+    }
 }
 
 impl ApplicationHandler<BrowserEvent> for App {
@@ -247,6 +820,16 @@ impl ApplicationHandler<BrowserEvent> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: BrowserEvent) {
         println!("  {:?}: {event:?}", self.step);
         self.events.push(event.clone());
+
+        // The hidden page finishing its load starts the feature operations.
+        if self.step == Step::Features && !self.features.kicked_off {
+            if let BrowserEvent::LoadFinished { url } = &event {
+                if url == &self.url("/feature") {
+                    self.kick_off_features();
+                }
+            }
+        }
+
         let BrowserEvent::TitleChanged { title } = event else {
             return;
         };
@@ -273,6 +856,9 @@ impl ApplicationHandler<BrowserEvent> for App {
                 let profile = self.other_profile.clone();
                 self.open(&profile, "/whoami");
                 self.step = Step::OtherProfile;
+            }
+            Step::Features if title.starts_with("cookies:") => {
+                self.features.sent_cookies = Some(title);
             }
             Step::OtherProfile if title.starts_with("cookies:") => {
                 self.expect(title == "cookies:", "a view on another profile does not");
@@ -309,19 +895,31 @@ impl ApplicationHandler<BrowserEvent> for App {
             }
             (Step::InspectorClosing, Some(false)) => {
                 self.expect(true, "the inspector closed");
-                self.completed = true;
+                // The main view's inspector is done; move to the feature phase.
                 self.browser = None;
-                event_loop.exit();
+                self.start_features();
             }
             _ => {}
         }
-        if !self.failures.is_empty() && self.browser.is_none() {
+
+        if self.step == Step::Features && self.features.kicked_off {
+            self.advance_features();
+            if !self.completed && self.features_complete() {
+                self.check_features();
+                event_loop.exit();
+            }
+        }
+
+        if !self.failures.is_empty() && self.browser.is_none() && !self.features.started {
             // Creating a view failed; nothing more will happen.
             event_loop.exit();
         } else if self.started.elapsed() > TIMEOUT {
             self.failures
                 .push(format!("timed out waiting in step {:?}", self.step));
             self.browser = None;
+            self.features.probe = None;
+            self.features.nested = None;
+            self.features.unreachable = None;
             event_loop.exit();
         }
         event_loop.set_control_flow(ControlFlow::wait_duration(Duration::from_millis(20)));
@@ -345,10 +943,13 @@ fn run() -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let other_profile = profiles.create("Other")?;
 
     let event_loop = EventLoop::<BrowserEvent>::with_user_event().build()?;
+    let (probe_tx, probe_rx) = std::sync::mpsc::channel();
     let mut app = App {
         engine,
         origin,
         proxy: event_loop.create_proxy(),
+        probe_tx,
+        probe_rx,
         main_profile: main_profile.clone(),
         other_profile: other_profile.clone(),
         step: Step::FirstPage,
@@ -356,6 +957,7 @@ fn run() -> Result<Vec<String>, Box<dyn std::error::Error>> {
         events: Vec::new(),
         failures: Vec::new(),
         completed: false,
+        features: Features::default(),
         browser: None,
         window: None,
     };

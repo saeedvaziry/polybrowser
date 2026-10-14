@@ -118,6 +118,35 @@ needs Full Disk Access, and gets `Error::PermissionDenied` without it.
 The importers are tested against databases built to each browser's schema, not
 yet against real browser profiles.
 
+## Scripts, snapshots, find and cookies
+
+A `Browser` exposes the parts of a page an application usually needs. Each runs
+on the main thread and reports its result to a callback, also on the main
+thread:
+
+```rust
+browser.run_script("return document.title;", |result| println!("{result:?}"))?;
+browser.snapshot(|image| { /* RGBA, works even while the view is hidden */ })?;
+browser.find("needle", FindOptions::default(), |found| println!("{found:?}"))?;
+browser.cookies(None, |cookies| { /* the profile's cookies */ })?;
+browser.set_cookie(cookie, |done| { /* ... */ })?;
+```
+
+`clear_cookies`, `delete_cookies` and `clear_find` round these out. The same
+cookie and site-data operations also work without a view, given only a profile:
+`polybrowser::clear_site_data(engine, &profile, done)` and
+`polybrowser::import_cookies(engine, &profile, cookies, done)`.
+
+Besides `LoadStarted`, `LoadFinished`, `UrlChanged` and `TitleChanged`, a view
+reports `LoadFailed`, `ProgressChanged`, `NavigationStateChanged`,
+`FaviconChanged`, `CloseRequested` (the page called `window.close()`) and
+`ExternalLinkRequested` (the user clicked a `mailto:`, `tel:` or similar link
+the engine cannot open, for the application to hand to the OS).
+
+These features are implemented for WebKit on macOS. `ExternalProfile::read_cookies`
+also reads cookies from the installed browsers, decrypting the Chromium family's
+with the key from the macOS login keychain.
+
 ## Developer tools
 
 Every engine's page inspector is available: Web Inspector in WebKit, DevTools

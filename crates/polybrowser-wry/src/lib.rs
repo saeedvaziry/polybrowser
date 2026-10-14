@@ -13,14 +13,18 @@ use std::{
 };
 
 use polybrowser_core::{
-    backend::{EngineBackend, EventSink, NavigationFilter, ViewBackend, ViewConfig},
-    BrowserEvent, Engine, Error, NewWindowPolicy, Rect, Result,
+    backend::{Done, EngineBackend, EventSink, NavigationFilter, ViewBackend, ViewConfig},
+    BrowserEvent, Cookie, Engine, Error, FindOptions, Image, NewWindowPolicy, Profile, Rect,
+    Result,
 };
 use raw_window_handle::WindowHandle;
 use wry::{
     dpi::{LogicalPosition, LogicalSize},
     NewWindowResponse, PageLoadEvent, WebView, WebViewBuilder,
 };
+
+#[cfg(target_os = "macos")]
+mod webkit;
 
 /// The engine behind the system web view on the platform being compiled for.
 pub const ENGINE: Engine = if cfg!(target_os = "windows") {
@@ -33,6 +37,24 @@ pub const ENGINE: Engine = if cfg!(target_os = "windows") {
 /// loading a document. Nothing in it is trusted; it only prompts a look at
 /// the view's real URL.
 const ADDRESS_CHANGED: &str = "polybrowser:address-changed";
+
+/// Message the injected shim posts when the page calls `window.close()`.
+#[cfg(not(target_os = "macos"))]
+const CLOSE_REQUESTED: &str = "polybrowser:close-requested";
+
+/// `window.close()` normally does nothing for an embedded view; this turns it
+/// into an event the application can act on. It is injected into the main
+/// frame only. wry's IPC does not say which frame a message came from, so on
+/// macOS a native handler that checks the sender takes its place.
+#[cfg(not(target_os = "macos"))]
+const CLOSE_SHIM: &str = r#"(function () {
+  if (window !== window.top) return;
+  window.close = function () {
+    try { window.ipc.postMessage("polybrowser:close-requested"); } catch (error) {}
+  };
+})();"#;
+#[cfg(target_os = "macos")]
+use webkit::CLOSE_SHIM;
 
 /// `history.pushState` and friends do not produce load events, so a page has
 /// to say when it used them.
@@ -82,6 +104,8 @@ impl EngineBackend for WryBackend {
             webview: RefCell::new(Weak::new()),
             address: RefCell::new(String::new()),
             new_window_policy: config.new_window_policy,
+            #[cfg(target_os = "macos")]
+            favicon: Rc::new(RefCell::new(String::new())),
         });
 
         let context = platform::context_for(&config.storage);
@@ -97,12 +121,14 @@ impl EngineBackend for WryBackend {
             .with_visible(config.visible)
             .with_devtools(config.devtools)
             .with_initialization_script_for_main_only(WATCH_ADDRESS, true)
+            .with_initialization_script_for_main_only(CLOSE_SHIM, true)
             .with_ipc_handler({
                 let state = state.clone();
-                move |request| {
-                    if request.body() == ADDRESS_CHANGED {
-                        state.sync_address();
-                    }
+                move |request| match request.body().as_str() {
+                    ADDRESS_CHANGED => state.sync_address(),
+                    #[cfg(not(target_os = "macos"))]
+                    CLOSE_REQUESTED => state.emit(BrowserEvent::CloseRequested),
+                    _ => {}
                 }
             })
             .with_on_page_load_handler({
@@ -111,12 +137,14 @@ impl EngineBackend for WryBackend {
                     // A new document first, then its address: the order
                     // `BrowserEvent` promises.
                     PageLoadEvent::Started => {
+                        state.reset_favicon();
                         state.emit(BrowserEvent::LoadStarted { url: url.clone() });
                         state.set_address(&url);
                     }
                     PageLoadEvent::Finished => {
                         state.set_address(&url);
                         state.emit(BrowserEvent::LoadFinished { url });
+                        state.emit_favicon();
                     }
                 }
             })
@@ -158,7 +186,12 @@ impl EngineBackend for WryBackend {
         drop(context_guard);
         *state.webview.borrow_mut() = Rc::downgrade(&webview);
 
+        #[cfg(target_os = "macos")]
+        let observers = webkit::install(&webview, state.events.clone());
+
         Ok(Box::new(WryView {
+            #[cfg(target_os = "macos")]
+            _observers: observers,
             webview,
             _context: context,
         }))
@@ -177,11 +210,30 @@ struct State {
     /// The last address reported, to report each change once.
     address: RefCell<String>,
     new_window_policy: NewWindowPolicy,
+    /// The last favicon URL reported for the current document, so the same one
+    /// is not reported twice in a row.
+    #[cfg(target_os = "macos")]
+    favicon: Rc<RefCell<String>>,
 }
 
 impl State {
     fn emit(&self, event: BrowserEvent) {
         (self.events)(event);
+    }
+
+    /// Forgets the current favicon so the next document's can be reported.
+    fn reset_favicon(&self) {
+        #[cfg(target_os = "macos")]
+        self.favicon.borrow_mut().clear();
+    }
+
+    /// Reads the current document's favicon and reports it if it changed.
+    fn emit_favicon(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(webview) = self.webview.borrow().upgrade() {
+            use wry::WebViewExtMacOS;
+            webkit::emit_favicon(webview.webview(), self.events.clone(), self.favicon.clone());
+        }
     }
 
     fn set_address(&self, url: &str) {
@@ -213,6 +265,9 @@ impl State {
 }
 
 struct WryView {
+    /// Native observers, declared first so they detach before the view goes.
+    #[cfg(target_os = "macos")]
+    _observers: webkit::Observers,
     webview: Rc<WebView>,
     /// Declared after the view so that it is dropped after it: wry wants a
     /// context to outlive the views created from it.
@@ -307,6 +362,76 @@ impl ViewBackend for WryView {
 
     fn clear_browsing_data(&self) -> Result<()> {
         self.webview.clear_all_browsing_data().map_err(error)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn run_script(&self, body: &str, done: Done<String>) -> Result<()> {
+        webkit::run_script(&self.webview, body, done)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn snapshot(&self, done: Done<Image>) -> Result<()> {
+        webkit::snapshot(&self.webview, done)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn find(&self, query: &str, options: FindOptions, done: Done<bool>) -> Result<()> {
+        webkit::find(&self.webview, query, options, done)
+    }
+
+    fn clear_find(&self) -> Result<()> {
+        // Dropping the selection removes the find highlight on every platform.
+        self.webview
+            .evaluate_script("window.getSelection && window.getSelection().removeAllRanges()")
+            .map_err(error)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn cookies(&self, url: Option<&str>, done: Done<Vec<Cookie>>) -> Result<()> {
+        webkit::cookies(&self.webview, url, done)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn set_cookie(&self, cookie: Cookie, done: Done<()>) -> Result<()> {
+        webkit::set_cookie(&self.webview, cookie, done)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn delete_cookies(&self, name: &str, domain: Option<&str>, done: Done<usize>) -> Result<()> {
+        webkit::delete_cookies(&self.webview, name, domain, done)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn clear_cookies(&self, done: Done<()>) -> Result<()> {
+        webkit::clear_cookies(&self.webview, done)
+    }
+}
+
+/// Clears cookies, caches and storage of a profile's data store in this
+/// engine, without a view. Main thread only; WebKit on macOS only.
+pub fn clear_site_data(profile: &Profile, done: Done<()>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        webkit::clear_site_data(profile, done)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (profile, done);
+        Err(Error::unsupported("clear_site_data"))
+    }
+}
+
+/// Writes cookies into a profile's data store in this engine, without a view,
+/// and reports how many were written. Main thread only; WebKit on macOS only.
+pub fn import_cookies(profile: &Profile, cookies: Vec<Cookie>, done: Done<usize>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        webkit::import_cookies(profile, cookies, done)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (profile, cookies, done);
+        Err(Error::unsupported("import_cookies"))
     }
 }
 

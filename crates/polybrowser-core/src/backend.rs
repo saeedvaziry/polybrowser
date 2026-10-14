@@ -13,7 +13,14 @@ use std::{
 
 use raw_window_handle::WindowHandle;
 
-use crate::{BrowserEvent, Engine, NewWindowPolicy, ProfileId, Rect, Result};
+use crate::{
+    BrowserEvent, Cookie, Engine, Error, FindOptions, Image, NewWindowPolicy, ProfileId, Rect,
+    Result,
+};
+
+/// A callback invoked once, on the main thread, with the result of an
+/// asynchronous view operation.
+pub type Done<T> = Box<dyn FnOnce(Result<T>) + 'static>;
 
 /// Receives events from a view. Always called on the main thread.
 pub type EventSink = Rc<dyn Fn(BrowserEvent)>;
@@ -83,6 +90,57 @@ pub trait ViewBackend {
     fn is_devtools_open(&self) -> bool;
     /// Deletes cookies, caches and site storage of the view's profile.
     fn clear_browsing_data(&self) -> Result<()>;
+
+    /// Runs the body of an async JavaScript function in the main frame's
+    /// content world and reports the JSON text of its return value. See
+    /// [`Browser::run_script`](crate::backend::ViewBackend::run_script) on the
+    /// facade for the contract. The default is [`Error::Unsupported`].
+    fn run_script(&self, _body: &str, _done: Done<String>) -> Result<()> {
+        Err(Error::unsupported("run_script"))
+    }
+
+    /// Captures the view as an [`Image`], working even while it or an ancestor
+    /// is hidden. A view without a size is an error, returned at once. The
+    /// default is [`Error::Unsupported`].
+    fn snapshot(&self, _done: Done<Image>) -> Result<()> {
+        Err(Error::unsupported("snapshot"))
+    }
+
+    /// Finds and selects `query` in the page, reporting whether it matched.
+    /// The default is [`Error::Unsupported`].
+    fn find(&self, _query: &str, _options: FindOptions, _done: Done<bool>) -> Result<()> {
+        Err(Error::unsupported("find"))
+    }
+
+    /// Removes the selection left by [`find`](ViewBackend::find). The default
+    /// is [`Error::Unsupported`].
+    fn clear_find(&self) -> Result<()> {
+        Err(Error::unsupported("clear_find"))
+    }
+
+    /// All cookies of the view's profile store, or only those that would be
+    /// sent to `url`. The default is [`Error::Unsupported`].
+    fn cookies(&self, _url: Option<&str>, _done: Done<Vec<Cookie>>) -> Result<()> {
+        Err(Error::unsupported("cookies"))
+    }
+
+    /// Stores a cookie in the view's profile store. The default is
+    /// [`Error::Unsupported`].
+    fn set_cookie(&self, _cookie: Cookie, _done: Done<()>) -> Result<()> {
+        Err(Error::unsupported("set_cookie"))
+    }
+
+    /// Deletes every cookie with `name` (and exact `domain` if given) and
+    /// reports how many were removed. The default is [`Error::Unsupported`].
+    fn delete_cookies(&self, _name: &str, _domain: Option<&str>, _done: Done<usize>) -> Result<()> {
+        Err(Error::unsupported("delete_cookies"))
+    }
+
+    /// Deletes every cookie of the view's profile store. The default is
+    /// [`Error::Unsupported`].
+    fn clear_cookies(&self, _done: Done<()>) -> Result<()> {
+        Err(Error::unsupported("clear_cookies"))
+    }
 }
 
 const PURGE_QUEUE_FILE: &str = "purge-queue.json";

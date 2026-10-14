@@ -14,3 +14,27 @@ devtools = ["wry/devtools"]
 polybrowser-core = { workspace = true }
 raw-window-handle = { workspace = true }
 wry = { workspace = true }
+
+# Native WebKit for the features wry does not expose (scripts with results,
+# snapshots, find, cookies, extra navigation events). macOS only.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { workspace = true }
+block2 = { workspace = true }
+objc2-foundation = { workspace = true, features = [
+    "NSString", "NSData", "NSDate", "NSArray", "NSDictionary", "NSError",
+    "NSHTTPCookie", "NSValue", "NSSet", "NSUUID", "NSObject", "NSEnumerator",
+    "NSGeometry", "NSKeyValueObserving", "NSObjCRuntime", "NSRunLoop", "NSTimer",
+    "NSURL", "NSURLRequest", "block2",
+] }
+objc2-app-kit = { workspace = true, features = [
+    "NSBitmapImageRep", "NSGraphicsContext", "NSImage", "NSImageRep",
+    "NSView", "NSResponder", "NSGraphics", "NSWindow", "objc2-core-foundation",
+] }
+objc2-web-kit = { workspace = true, features = [
+    "WKWebView", "WKWebViewConfiguration", "WKWebsiteDataStore",
+    "WKHTTPCookieStore", "WKWebsiteDataRecord", "WKNavigationDelegate",
+    "WKNavigation", "WKNavigationAction", "WKFrameInfo", "WKContentWorld",
+    "WKFindConfiguration", "WKFindResult", "WKSnapshotConfiguration",
+    "WKPDFConfiguration", "WKError", "WKScriptMessage", "WKScriptMessageHandler",
+    "WKUserContentController", "block2", "objc2-app-kit",
+] }

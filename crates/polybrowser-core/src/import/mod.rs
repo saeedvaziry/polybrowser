@@ -24,9 +24,11 @@ use std::{
 
 use rusqlite::Connection;
 
-use crate::{BookmarkNode, Error, Profile, Result, Timestamp, Visit};
+use crate::{BookmarkNode, Cookie, Error, Profile, Result, Timestamp, Visit};
 
 mod chromium;
+#[cfg(target_os = "macos")]
+mod cookie_crypto;
 mod firefox;
 mod safari;
 
@@ -71,6 +73,18 @@ impl ExternalBrowser {
             ExternalBrowser::Arc => "arc",
             ExternalBrowser::Firefox => "firefox",
             ExternalBrowser::Safari => "safari",
+        }
+    }
+
+    /// Whether [`ExternalProfile::read_cookies`] can read this browser's
+    /// cookies on the current platform. Firefox stores them unencrypted
+    /// everywhere; Chromium-family cookies need the macOS login keychain;
+    /// Safari's are never readable.
+    pub const fn supports_cookies(self) -> bool {
+        match self {
+            ExternalBrowser::Firefox => true,
+            ExternalBrowser::Safari => false,
+            _ => cfg!(target_os = "macos"),
         }
     }
 
@@ -169,6 +183,22 @@ impl ExternalProfile {
             visit.source = self.browser.id().to_owned();
         }
         Ok(visits)
+    }
+
+    /// Reads the profile's cookies.
+    ///
+    /// Firefox cookies are stored unencrypted. Chromium-family cookies are
+    /// decrypted with the browser's key from the macOS login keychain, so this
+    /// is macOS-only for them and the application may be prompted for keychain
+    /// access; a denial is [`Error::PermissionDenied`]. Safari is
+    /// [`Error::UnsupportedSource`]. See
+    /// [`ExternalBrowser::supports_cookies`].
+    pub fn read_cookies(&self) -> Result<Vec<Cookie>> {
+        match self.browser {
+            ExternalBrowser::Firefox => firefox::read_cookies(&self.path),
+            ExternalBrowser::Safari => safari::read_cookies(&self.path),
+            _ => chromium::read_cookies(self.browser, &self.path),
+        }
     }
 
     /// Reads the profile's bookmarks. The top level holds the browser's own
